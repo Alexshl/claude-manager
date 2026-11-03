@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.10", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t .
+      - name: Shellcheck (Linux)
+        if: runner.os == 'Linux'
+        run: shellcheck ./*.sh
+      - name: Shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install shellcheck
+          shellcheck ./*.sh

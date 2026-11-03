@@ -24,11 +24,13 @@ if ! command -v tmux >/dev/null 2>&1; then
   esac
 fi
 
-command -v python3 >/dev/null 2>&1 || { echo "python3 не знайдено" >&2; exit 1; }
-python3 -c 'import sys; sys.exit(sys.version_info < (3,10))' || { echo "Потрібен Python 3.10+" >&2; exit 1; }
+# CM_PYTHON may point to a specific interpreter (set by quick-install.sh).
+PY="${CM_PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || { echo "$PY не знайдено" >&2; exit 1; }
+"$PY" -c 'import sys; sys.exit(sys.version_info < (3,10))' || { echo "Потрібен Python 3.10+" >&2; exit 1; }
 
 mkdir -p "$(dirname "$VENV")" "$BIN_DIR" "$HOME/.local/state/claude-manager"
-[ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+[ -x "$VENV/bin/python" ] || "$PY" -m venv "$VENV"
 "$VENV/bin/pip" install --quiet -e "$REPO"
 ln -sf "$VENV/bin/cm" "$CM_BIN"
 

@@ -10,7 +10,7 @@ PS = f"""  PID  PPID ARGS
   100     1 /sbin/launchd
   200   100 tmux new-session -d -s cm
   210   200 claude --resume {SID} --remote-control mac: x
-  300     1 /Users/u/.local/bin/claude --resume {SID}
+  300     1 /home/u/.local/bin/claude --resume {SID}
   400     1 vim notes-{SID}.txt
   500     1 claude --resume 99999999-0000
 """
