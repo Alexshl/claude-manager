@@ -38,9 +38,36 @@ def launch(sess: dict) -> None:
         claude_store.trust_folder(sess["cwd"])
     except (OSError, ValueError) as e:
         log.warning("could not mark %s trusted: %s", sess["cwd"], e)
-    tmux.start_window(state.short_id(sess["id"]), sess["cwd"], build_command(sess))
+    name = state.short_id(sess["id"])
+    tmux.start_window(name, sess["cwd"], build_command(sess))
+    _accept_trust_prompt(name)
     if not sess.get("started"):
         state.update(sess["id"], started=time.time())
+
+
+TRUST_PROMPT = "Yes, I trust this folder"
+READY_MARK = "remote-control is active"
+
+
+def _accept_trust_prompt(name: str, timeout: float = 30) -> None:
+    """Answer the folder-trust dialog that still appears when the folder's
+    .claude/settings.json pre-approves permissions (hasTrustDialogAccepted
+    doesn't skip it). The user asked cm to run this folder, so we accept."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(1)
+        try:
+            screen = tmux.capture(name, 60)
+        except tmux.TmuxError:
+            return
+        if READY_MARK in screen:
+            return
+        if TRUST_PROMPT in screen:
+            log.info("accepting folder trust prompt in %s", name)
+            tmux.send_keys(name, "Down")
+            time.sleep(0.3)
+            tmux.send_keys(name, "Enter")
+            return
 
 
 def ensure_control() -> dict:

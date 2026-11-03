@@ -86,6 +86,12 @@ def capture(name: str, lines: int = 50) -> str:
     return p.stdout
 
 
+def send_keys(name: str, *keys: str) -> None:
+    found = _find(name)
+    if found:
+        _run("send-keys", "-t", found[0], *keys, check=False)
+
+
 def pane_pids() -> list[int]:
     """PIDs of the panes' root processes in the cm session."""
     if not _has_session():
