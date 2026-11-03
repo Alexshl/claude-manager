@@ -1,6 +1,7 @@
 """Paths and global settings."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import socket
@@ -78,14 +79,20 @@ def display_name(name: str) -> str:
 
 def control_id() -> str:
     """Fixed id of the control session; generated once and stored in config.json."""
+    cid = load().get("control_id")
+    if cid:
+        return cid
     path = config_path()
-    data = load()
-    cid = data.get("control_id")
-    if not cid:
-        cid = str(uuid.uuid4())
-        data["control_id"] = cid
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        os.replace(tmp, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # The daemon and `cm control` can race here on first install: lock, then re-read.
+    with open(path.parent / "config.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = load()
+        cid = data.get("control_id")
+        if not cid:
+            cid = str(uuid.uuid4())
+            data["control_id"] = cid
+            tmp = path.with_name(f"{path.name}.tmp{os.getpid()}")
+            tmp.write_text(json.dumps(data, indent=2))
+            os.replace(tmp, path)
     return cid
