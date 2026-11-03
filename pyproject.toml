@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-manager"
+version = "0.1.0"
+description = "Keeps Claude Code Remote Control sessions alive inside tmux"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+cm = "cm.cli:main"
+
+[tool.setuptools]
+packages = ["cm"]
+
+[tool.setuptools.package-data]
+cm = ["service/*.tmpl"]

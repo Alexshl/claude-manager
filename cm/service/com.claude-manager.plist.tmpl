@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude-manager</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@CM_BIN@</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+  </dict>
+  <key>AbandonProcessGroup</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@HOME@/.local/state/claude-manager/launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/.local/state/claude-manager/launchd.log</string>
+</dict>
+</plist>

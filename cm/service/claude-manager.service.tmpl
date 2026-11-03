@@ -1,0 +1,14 @@
+[Unit]
+Description=claude-manager (Claude Code Remote Control keep-alive)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="PATH=@PATH@"
+ExecStart=@CM_BIN@ daemon
+KillMode=process
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
