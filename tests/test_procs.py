@@ -86,3 +86,18 @@ class NamingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartupPromptsTest(unittest.TestCase):
+    def test_answers_trust_then_chrome_until_ready(self):
+        screens = iter([
+            "Yes, I trust this folder\nEnter to confirm",
+            "remote-control is active\n❯ No, keep browser tools off\n  Yes, use my browser\nEnter to confirm",
+            "remote-control is active\n❯ Try something",
+        ])
+        with mock.patch.object(daemon.time, "sleep"), \
+             mock.patch.object(daemon.tmux, "capture", side_effect=lambda *a: next(screens)), \
+             mock.patch.object(daemon.tmux, "send_keys") as keys:
+            daemon._answer_startup_prompts("abc")
+        self.assertEqual(keys.call_args_list,
+                         [mock.call("abc", "Down"), mock.call("abc", "Enter")] * 2)

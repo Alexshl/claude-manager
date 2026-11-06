@@ -40,34 +40,51 @@ def launch(sess: dict) -> None:
         log.warning("could not mark %s trusted: %s", sess["cwd"], e)
     name = state.short_id(sess["id"])
     tmux.start_window(name, sess["cwd"], build_command(sess))
-    _accept_trust_prompt(name)
+    _answer_startup_prompts(name)
     if not sess.get("started"):
         state.update(sess["id"], started=time.time())
 
 
-TRUST_PROMPT = "Yes, I trust this folder"
 READY_MARK = "remote-control is active"
+DIALOG_MARK = "Enter to confirm"
+# Startup dialogs that block an unattended session, keyed by text unique to
+# each; the answer is always the second option (Down, Enter).
+#  - folder trust: still shown when .claude/settings.json pre-approves
+#    permissions (hasTrustDialogAccepted doesn't skip it); the user asked cm
+#    to run this folder, so we accept.
+#  - Claude in Chrome: asked once the extension is detected; Remote Control
+#    is already "active" behind it, but the session is unusable until answered.
+#  - fullscreen renderer offer: decline.
+STARTUP_PROMPTS = {
+    "Yes, I trust this folder": "folder trust",
+    "Yes, use my browser": "Claude in Chrome",
+    "Try the new fullscreen renderer": "fullscreen renderer",
+}
 
 
-def _accept_trust_prompt(name: str, timeout: float = 30) -> None:
-    """Answer the folder-trust dialog that still appears when the folder's
-    .claude/settings.json pre-approves permissions (hasTrustDialogAccepted
-    doesn't skip it). The user asked cm to run this folder, so we accept."""
+def _answer_startup_prompts(name: str, timeout: float = 45) -> None:
+    """Answer every known startup dialog until the session is ready."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         time.sleep(1)
         try:
-            screen = tmux.capture(name, 60)
+            # Only the bottom of the pane: answered dialogs may linger above.
+            screen = "\n".join(tmux.capture(name, 60).splitlines()[-25:])
         except tmux.TmuxError:
             return
-        if READY_MARK in screen:
-            return
-        if TRUST_PROMPT in screen:
-            log.info("accepting folder trust prompt in %s", name)
+        prompt = next((label for text, label in STARTUP_PROMPTS.items() if text in screen), None)
+        if prompt:
+            log.info("answering %s prompt in %s", prompt, name)
             tmux.send_keys(name, "Down")
             time.sleep(0.3)
             tmux.send_keys(name, "Enter")
+            time.sleep(1)
+            continue
+        if DIALOG_MARK in screen:
+            continue  # an unknown dialog may still be drawing; give it time
+        if READY_MARK in screen:
             return
+    log.warning("session %s not ready after %ss; check `cm logs`", name, timeout)
 
 
 def ensure_control() -> dict:
