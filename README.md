@@ -60,6 +60,8 @@ This creates a venv in `~/.local/share/claude-manager/venv`, links `cm` into `~/
 | `cm stop <id\|name>` | stop and forget a session (the `manager` session cannot be stopped) |
 | `cm restart <id\|name>` | restart a session |
 | `cm logs <id\|name> [-n N]` | recent terminal output |
+| `cm send <id\|prefix\|name> <text\|-> [--wait N]` | send a message to a live managed session as one bracketed paste + Enter (`-` reads stdin; max 16000 chars; control chars rejected; never the `manager` session). Exit codes: 0 sent, 1 other error (also `manager`, ambiguous id, bad text), 3 not managed or dead, 4 dialog/permission prompt on screen or no own claude process in its window; use `--` before text starting with `-` (`--wait N` waits up to N s for a dialog to go) |
+| `cm who <id\|prefix\|name> [--json]` | JSON: `session_id`, `managed`, `alive`, `holders` (`pid`, `remote_control`, `ours`). `cm ls --json` also has `session_id`, `window`, `control` |
 | `cm daemon [--once] [--interval 30]` | keep-alive loop (run by the service) |
 | `cm control` | register the control session |
 | `cm update` | `git pull --ff-only`, reinstall if `pyproject.toml` changed, restart the daemon (tmux sessions keep running) |

@@ -17,7 +17,20 @@ MODES = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan
 
 
 class CliError(Exception):
-    pass
+    def __init__(self, msg: str = "", code: int = 1):
+        super().__init__(msg)
+        self.code = code
+
+
+EXIT_NOT_MANAGED = 3
+EXIT_NOT_READY = 4
+# Pane-text markers of prompts where our Enter would approve something.
+PERMISSION_MARKS = (
+    "Do you want to proceed?", "Do you want to make this edit", "Do you want to create",
+    "❯ 1. Yes", "1. Yes", "Yes, and don't ask again",
+    "No, and tell Claude what to do differently", "Esc to cancel",
+)
+MAX_SEND_CHARS = 16000
 
 
 def _ts(t) -> str:
@@ -44,7 +57,8 @@ def cmd_ls(a) -> None:
     rows = []
     for s in sessions:
         alive = tmux.is_alive(state.short_id(s["id"]))
-        rows.append({**s, "alive": alive})
+        rows.append({**s, "session_id": s["id"], "window": state.short_id(s["id"]),
+                     "control": s["id"] == config.control_id(), "alive": alive})
     if a.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return
@@ -121,7 +135,7 @@ def _find(key: str) -> dict:
 
 def _refuse_control(s: dict) -> None:
     if s["id"] == config.control_id():
-        raise CliError("refusing to stop the control session 'manager'")
+        raise CliError("refusing to touch the control session 'manager'")
 
 
 def cmd_stop(a) -> None:
@@ -134,6 +148,7 @@ def cmd_stop(a) -> None:
 
 def cmd_restart(a) -> None:
     s = _find(a.session)
+    _refuse_control(s)
     daemon.launch(s)
     state.update(s["id"], restarts=s.get("restarts", 0) + 1, last_restart=time.time())
     print(f"restarted {s['name']} ({s['id']})")
@@ -170,6 +185,93 @@ def cmd_update(a) -> None:
 def cmd_logs(a) -> None:
     s = _find(a.session)
     print(tmux.capture(state.short_id(s["id"]), a.n), end="")
+
+
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _clean_text(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    if not text.strip():
+        raise CliError("empty text")
+    if not text:
+        raise CliError("empty text")
+    if len(text) > MAX_SEND_CHARS:
+        raise CliError(f"text is {len(text)} chars, limit is {MAX_SEND_CHARS}")
+    if _CTRL_RE.search(text):
+        raise CliError("text contains control characters (only newline and tab are allowed)")
+    return text
+
+
+def _dialog_on_screen(window: str) -> bool:
+    screen = "\n".join(tmux.capture(window, 25).splitlines()[-25:])
+    return (daemon.DIALOG_MARK in screen or any(t in screen for t in daemon.STARTUP_PROMPTS)
+            or any(t in screen for t in PERMISSION_MARKS))
+
+
+def _own_procs(session_id: str) -> list:
+    allp = procs.ps_all()
+    found = procs.find_session_procs(session_id, allp)
+    try:
+        panes = tmux.window_pane_pids(state.short_id(session_id))
+    except tmux.TmuxError:
+        panes = []
+    return procs.split_ours(found, allp, panes)[0]
+
+
+def cmd_send(a) -> None:
+    raw = sys.stdin.buffer.read().decode("utf-8") if a.text == "-" else a.text
+    text = _clean_text(raw)
+    try:
+        s = _find(a.session)
+    except state.StateError as e:
+        # ambiguous prefix is a plain error; "no match" means not managed
+        raise CliError(str(e), 1 if "ambiguous" in str(e) else EXIT_NOT_MANAGED)
+    if s["id"] == config.control_id():
+        raise CliError("refusing to send to the control session 'manager'")
+    win = state.short_id(s["id"])
+    if not tmux.is_alive(win):
+        raise CliError(f"session {s['name']} ({win}) is not alive; run `cm restart`", EXIT_NOT_MANAGED)
+    if not _own_procs(s["id"]):
+        raise CliError(f"no claude process of session {win} runs in its tmux window", EXIT_NOT_READY)
+    deadline = time.time() + max(a.wait, 0)
+    while _dialog_on_screen(win):
+        if time.time() >= deadline:
+            raise CliError(f"session {s['name']} ({win}) is waiting on a dialog; see `cm logs`", EXIT_NOT_READY)
+        time.sleep(1)
+    tmux.paste_and_submit(win, text)
+    print(f"sent {len(text)} chars to {s['name']} ({win})")
+
+
+def cmd_who(a) -> None:
+    sessions = state.load()
+    named = [s for s in sessions if s.get("name") == a.id]
+    hits = named or [s for s in sessions if s["id"].startswith(a.id)]
+    if len(hits) > 1:
+        raise CliError(f"'{a.id}' is ambiguous: " + ", ".join(state.short_id(s["id"]) for s in hits))
+    sid = hits[0]["id"] if hits else None
+    if sid is None:
+        try:
+            sid = claude_store.find_by_prefix(a.id).id
+        except LookupError:
+            sid = a.id
+    managed = next((s for s in sessions if s["id"] == sid), None)
+    allp = procs.ps_all()
+    found = procs.find_session_procs(sid, allp)
+    try:
+        panes = tmux.pane_pids()
+    except tmux.TmuxError:
+        panes = []
+    ours, _ = procs.split_ours(found, allp, panes)
+    ours_pids = {p.pid for p in ours}
+    out = {
+        "session_id": sid,
+        "managed": managed is not None,
+        "alive": bool(managed and tmux.is_alive(state.short_id(sid))),
+        "holders": [{"pid": p.pid, "remote_control": p.remote_control, "ours": p.pid in ours_pids}
+                    for p in found],
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
 
 
 def cmd_daemon(a) -> None:
@@ -224,6 +326,18 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("-n", type=int, default=50)
     x.set_defaults(fn=cmd_logs)
 
+    x = sub.add_parser("send", help="send a message to a managed session (bracketed paste + Enter)")
+    x.add_argument("session", help="id, id prefix or name")
+    x.add_argument("text", help="message, or - to read it from stdin")
+    x.add_argument("--wait", type=int, default=0, metavar="N",
+                   help="wait up to N seconds for a startup dialog to go away")
+    x.set_defaults(fn=cmd_send)
+
+    x = sub.add_parser("who", help="who holds a session: managed, alive, claude processes (JSON)")
+    x.add_argument("id", help="session id, prefix or name")
+    x.add_argument("--json", action="store_true", help="accepted for symmetry; output is always JSON")
+    x.set_defaults(fn=cmd_who)
+
     x = sub.add_parser("daemon", help="run the keep-alive loop")
     x.add_argument("--once", action="store_true")
     x.add_argument("--interval", type=int, default=30)
@@ -243,6 +357,9 @@ def main(argv=None) -> int:
         args.fn(args)
     except (CliError, state.StateError, tmux.TmuxError) as e:
         print(f"cm: error: {e}", file=sys.stderr)
+        return getattr(e, "code", 1)
+    except UnicodeDecodeError:
+        print("cm: error: stdin is not valid UTF-8", file=sys.stderr)
         return 1
     except BrokenPipeError:
         return 0
