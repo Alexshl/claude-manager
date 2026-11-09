@@ -1,6 +1,7 @@
 """Thin tmux wrapper: one tmux session, one window per managed session."""
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import os
 import shutil
@@ -97,31 +98,52 @@ def send_keys(name: str, *keys: str) -> None:
         _run("send-keys", "-t", found[0], *keys, check=False)
 
 
-def paste_and_submit(name: str, text: str) -> None:
-    """Paste `text` as one bracketed paste (stdin, no shell, no key-name parsing), then Enter.
+@contextlib.contextmanager
+def window_lock(name: str):
+    """Serialize input to one window (shared by `send` and `answer`)."""
+    lock_dir = config.state_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"send-{name}.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
 
-    Serialized per window with a file lock; the tmux buffer is unique per call
-    and removed on any failure.
+
+def _paste(name: str, text: str) -> str:
+    """Bracketed paste of `text` (stdin, no shell, no key-name parsing); returns the window id.
+
+    The tmux buffer is unique per call and removed on any failure. The caller holds window_lock.
     """
     found = _find(name)
     if not found or found[1]:
         raise TmuxError(f"no live tmux window '{name}'")
     wid = found[0]
     buf = f"cm-send-{name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    lock_dir = config.state_dir()
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    with open(lock_dir / f"send-{name}.lock", "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            _run("load-buffer", "-b", buf, "-", input=text)
-            _run("paste-buffer", "-p", "-d", "-b", buf, "-t", wid)
-            time.sleep(0.3)
-            _run("send-keys", "-t", wid, "Enter")
-        except BaseException:
-            _run("delete-buffer", "-b", buf, check=False)
-            raise
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    try:
+        _run("load-buffer", "-b", buf, "-", input=text)
+        _run("paste-buffer", "-p", "-d", "-b", buf, "-t", wid)
+    except BaseException:
+        _run("delete-buffer", "-b", buf, check=False)
+        raise
+    return wid
+
+
+def paste_text(name: str, text: str) -> None:
+    """Paste without Enter. The caller must hold `window_lock(name)`."""
+    _paste(name, text)
+
+
+def paste_and_submit(name: str, text: str) -> None:
+    """Paste `text` as one bracketed paste, then Enter, under the per-window lock."""
+    found = _find(name)
+    if not found or found[1]:
+        raise TmuxError(f"no live tmux window '{name}'")
+    with window_lock(name):
+        wid = _paste(name, text)
+        time.sleep(0.3)
+        _run("send-keys", "-t", wid, "Enter")
 
 
 def window_pane_pids(name: str) -> list[int]:
