@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 
-from . import claude_store, config, daemon, procs, state, tmux
+from . import claude_store, config, daemon, procs, screen, state, tmux
 
 MODES = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"]
 
@@ -24,12 +24,10 @@ class CliError(Exception):
 
 EXIT_NOT_MANAGED = 3
 EXIT_NOT_READY = 4
-# Pane-text markers of prompts where our Enter would approve something.
-PERMISSION_MARKS = (
-    "Do you want to proceed?", "Do you want to make this edit", "Do you want to create",
-    "❯ 1. Yes", "1. Yes", "Yes, and don't ask again",
-    "No, and tell Claude what to do differently", "Esc to cancel",
-)
+EXIT_UNCONFIRMED = 5   # `answer`: Enter was sent but the widget did not close; the answer may have gone through
+# Pane-text markers of prompts where our Enter would approve something
+# (`cm send` also refuses any widget with "Esc to cancel", incl. AskUserQuestion).
+PERMISSION_MARKS = (*screen.PERMISSION_MARKS, "Esc to cancel")
 MAX_SEND_CHARS = 16000
 
 
@@ -204,9 +202,9 @@ def _clean_text(text: str) -> str:
 
 
 def _dialog_on_screen(window: str) -> bool:
-    screen = "\n".join(tmux.capture(window, 25).splitlines()[-25:])
-    return (daemon.DIALOG_MARK in screen or any(t in screen for t in daemon.STARTUP_PROMPTS)
-            or any(t in screen for t in PERMISSION_MARKS))
+    text = "\n".join(tmux.capture(window, 25).splitlines()[-25:])
+    return (daemon.DIALOG_MARK in text or any(t in text for t in daemon.STARTUP_PROMPTS)
+            or any(t in text for t in PERMISSION_MARKS))
 
 
 def _own_procs(session_id: str) -> list:
@@ -241,6 +239,101 @@ def cmd_send(a) -> None:
         time.sleep(1)
     tmux.paste_and_submit(win, text)
     print(f"sent {len(text)} chars to {s['name']} ({win})")
+
+
+def _answer_target(a) -> tuple[dict, str]:
+    """Pick the managed, live, own session for `cm answer` (same checks as `send`)."""
+    try:
+        s = _find(a.session)
+    except state.StateError as e:
+        raise CliError(str(e), 1 if "ambiguous" in str(e) else EXIT_NOT_MANAGED)
+    if s["id"] == config.control_id():
+        raise CliError("refusing to answer in the control session 'manager'")
+    win = state.short_id(s["id"])
+    if not tmux.is_alive(win):
+        raise CliError(f"session {s['name']} ({win}) is not alive; run `cm restart`", EXIT_NOT_MANAGED)
+    if not _own_procs(s["id"]):
+        raise CliError(f"no claude process of session {win} runs in its tmux window", EXIT_NOT_READY)
+    return s, win
+
+
+def _read_widget(win: str) -> dict:
+    """Capture and parse the AskUserQuestion widget; exit 4 unless it is a plain single question."""
+    text = tmux.capture(win, screen.SCREEN_LINES)
+    kind = screen.classify(text)
+    if kind != "auq":
+        raise CliError(f"the screen of {win} shows "
+                       f"{'a permission/startup dialog' if kind == 'permission' else 'no question widget'}; "
+                       "see `cm logs`", EXIT_NOT_READY)
+    w = screen.parse_auq(text)
+    if w is None:
+        raise CliError("cannot read the question widget; see `cm logs`", EXIT_NOT_READY)
+    if w["multi_tab"] or w["multi_select"]:
+        raise CliError("multi-question or multi-select widget is not supported; answer in the terminal",
+                       EXIT_NOT_READY)
+    return w
+
+
+def _goto(win: str, w: dict, target: int) -> None:
+    """Arrow keys to `target`, then verify the cursor really is there (else exit 1, no Enter)."""
+    delta = target - w["current"]
+    for _ in range(abs(delta)):
+        tmux.send_keys(win, "Down" if delta > 0 else "Up")
+    if delta:
+        time.sleep(0.3)
+    text = tmux.capture(win, screen.SCREEN_LINES)
+    line = screen.option_line(text, target)
+    if screen.classify(text) == "permission" or not line or not line[0]:
+        raise CliError(f"cursor is not on item {target} after navigation; nothing was confirmed")
+
+
+def _wait_closed(win: str) -> bool:
+    for _ in range(10):
+        time.sleep(0.5)
+        if not screen.widget_open(tmux.capture(win, screen.SCREEN_LINES)):
+            return True
+    return False
+
+
+def cmd_answer(a) -> None:
+    if (a.option is None) == (a.text is None):
+        raise CliError("give exactly one of --option N or --text -")
+    text = None
+    if a.text is not None:
+        if a.text != "-":
+            raise CliError("--text takes - (text is read from stdin, never from argv)")
+        text = _clean_text(sys.stdin.buffer.read().decode("utf-8"))
+        if "\n" in text:
+            raise CliError("multi-line text is not supported: it would be sent as the answer at the first newline")
+    s, win = _answer_target(a)
+    with tmux.window_lock(win):
+        w = _read_widget(win)
+        if text is None:
+            labels = dict(w["options"])
+            if a.option not in labels:
+                raise CliError(f"--option {a.option} is out of range 1..{len(labels)}")
+            target = a.option
+            if a.expect_label is not None and not labels[target].strip().startswith(a.expect_label.strip()):
+                raise CliError("the question on screen is different from the expected one",
+                               EXIT_NOT_READY)
+        else:
+            target = w["type_n"]
+        _goto(win, w, target)
+        if text is not None:
+            tmux.paste_text(win, text)
+            time.sleep(0.3)
+            shown = screen.option_line(tmux.capture(win, screen.SCREEN_LINES), target)
+            prefix = " ".join(text[:20].split())
+            if not shown or not shown[0] or prefix not in " ".join(shown[1].split()):
+                raise CliError("text did not land in the field; nothing was confirmed")
+        tmux.send_keys(win, "Enter")
+        if not _wait_closed(win):
+            raise CliError("the question widget did not close after Enter; the answer may have been delivered, check `cm logs`",
+                           EXIT_UNCONFIRMED)
+    if text is None:
+        print(f"answered option {target} in {s['name']} ({win})")
+    else:
+        print(f"answered with text ({len(text)} chars) in {s['name']} ({win})")
 
 
 def cmd_who(a) -> None:
@@ -332,6 +425,14 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("--wait", type=int, default=0, metavar="N",
                    help="wait up to N seconds for a startup dialog to go away")
     x.set_defaults(fn=cmd_send)
+
+    x = sub.add_parser("answer", help="answer an AskUserQuestion widget (single question) of a managed session")
+    x.add_argument("session", help="id, id prefix or name")
+    x.add_argument("--option", type=int, metavar="N", help="choose listed option N")
+    x.add_argument("--text", metavar="-", help="type a custom one-line answer read from stdin (pass -)")
+    x.add_argument("--expect-label", metavar="L",
+                   help="refuse (exit 4) unless the chosen option's label starts with L")
+    x.set_defaults(fn=cmd_answer)
 
     x = sub.add_parser("who", help="who holds a session: managed, alive, claude processes (JSON)")
     x.add_argument("id", help="session id, prefix or name")
